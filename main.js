@@ -1,125 +1,94 @@
 const path = require('path');
-const os = require('os');
-const {
-  app,
-  BrowserWindow,
-  Menu,
-  globalShortcut,
-  ipcMain,
-  shell,
-} = require('electron');
-const imagemin = require('imagemin');
-const imageminMozjpeg = require('imagemin-mozjpeg');
-const imageminPngquant = require('imagemin-pngquant');
-const slash = require('slash');
-const log = require('electron-log');
+const { app, Menu, ipcMain, Tray } = require('electron');
+const Store = require('./Store');
+const MainWindow = require('./MainWindow');
+// const AppTray = require('./AppTray')
 
+// Set env
 process.env.NODE_ENV = 'production';
 
-const isDev = process.env.NODE_ENV !== 'production';
-const isMac = process.platform === 'darwin';
+const isDev = process.env.NODE_ENV !== 'production' ? true : false;
+const isMac = process.platform === 'darwin' ? true : false;
 
 let mainWindow;
-let aboutWindow;
+let tray;
+
+// Init store & defaults
+const store = new Store({
+  configName: 'user-settings',
+  defaults: {
+    settings: {
+      cpuOverload: 80,
+      alertFrequency: 5,
+    },
+  },
+});
 
 function createMainWindow() {
-  mainWindow = new BrowserWindow({
-    title: 'ImageShrink',
-    width: isDev ? 800 : 500,
-    height: 600,
-    closable: true,
-    resizable: isDev,
-    icon: './assets/icons/Icon_256x256.png',
-    backgroundColor: 'white',
-    webPreferences: {
-      nodeIntegration: true,
-    },
-  });
-
-  if (isDev) {
-    mainWindow.webContents.openDevTools();
-  }
-  // mainWindow.loadURL(`file://${__dirname}/app/index.html`);
-  // shorthand for above
-  mainWindow.loadFile('./app/index.html');
-}
-function createAboutWindow() {
-  aboutWindow = new BrowserWindow({
-    title: 'About ImageShrink',
-    width: 300,
-    height: 300,
-    closable: true,
-    resizable: false,
-    icon: './assets/icons/Icon_256x256.png',
-    backgroundColor: 'white',
-  });
-
-  // mainWindow.loadURL(`file://${__dirname}/app/index.html`);
-  // shorthand for above
-  aboutWindow.loadFile('./app/about.html');
+  mainWindow = new MainWindow('./app/index.html', isDev);
 }
 
-// Start the app
 app.on('ready', () => {
   createMainWindow();
 
-  // set up the menu
+  mainWindow.webContents.on('dom-ready', () => {
+    mainWindow.webContents.send('settings:get', store.get('settings'));
+  });
+
   const mainMenu = Menu.buildFromTemplate(menu);
   Menu.setApplicationMenu(mainMenu);
 
-  globalShortcut.register('CmdOrCtrl+R', () => {
-    mainWindow.reload();
-  });
-  globalShortcut.register('CmdOrCtrl+I', () => {
-    mainWindow.toggleDevTools();
+  mainWindow.on('close', e => {
+    if (!app.isQuitting) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
+
+    return true;
   });
 
-  mainWindow.on('ready', () => {
-    mainWindow = null;
+  const icon = path.join(__dirname, 'assets', 'icons', 'tray_icon.png');
+
+  // Create tray
+  // tray = new AppTray(icon, mainWindow)
+  tray = new Tray(icon);
+  tray.on('click', () => {
+    if (mainWindow.isVisible() === true) {
+      mainWindow.hide();
+    } else {
+      mainWindow.show();
+    }
   });
+  tray.setToolTip('SysMon');
+
+  tray.on('right-click', () => {
+    const contextMenu = Menu.buildFromTemplate([{
+      label: 'Quit',
+      click: () => {
+        app.isQuitting = true
+        app.quit()
+      }
+    }])
+
+    tray.popUpContextMenu(contextMenu);
+  }
+  )
 });
 
 const menu = [
+  ...(isMac ? [{ role: 'appMenu' }] : []),
   {
     role: 'fileMenu',
-    // label: 'File',
-    // submenu: [
-    //   {
-    //     label: 'Quit',
-    //     click: () => app.quit(),
-    //     accelerator: 'CmdOrCtrl+W',
-    //   },
-    // ],
   },
-  ...(!isMac
-    ? [
-        {
-          label: 'Help',
-          submenu: [
-            {
-              label: 'About',
-              click: createAboutWindow,
-            },
-          ],
-        },
-      ]
-    : []),
-  // for Mac
-  ...(isMac
-    ? [
-        {
-          label: app.name,
-          submenu: [
-            {
-              label: 'About',
-              click: createAboutWindow,
-            },
-          ],
-        },
-      ]
-    : []),
-
-  // for Dev
+  {
+    label: 'View',
+    submenu: [
+      {
+        label: 'Toggle Navigation',
+        click: () => mainWindow.webContents.send('nav:toggle'),
+      },
+    ],
+  },
   ...(isDev
     ? [
         {
@@ -135,42 +104,22 @@ const menu = [
     : []),
 ];
 
-async function shrinkImage({ imgPath, quality, destination }) {
-  try {
-    const pngQuality = quality / 100;
-    const files = await imagemin([slash(imgPath)], {
-      destination,
-      plugins: [
-        imageminMozjpeg({ quality }),
-        imageminPngquant({
-          quality: [pngQuality, pngQuality],
-        }),
-      ],
-    });
-
-    shell.openPath(destination);
-    log.info(files);
-    mainWindow.webContents.send('image:done');
-  } catch (err) {
-    log.error(err);
-  }
-}
-
-ipcMain.on('image:minimize', (e, options) => {
-  options.destination = path.join(os.homedir(), 'imageshrink');
-  shrinkImage(options);
+// Set settings
+ipcMain.on('settings:set', (e, value) => {
+  store.set('settings', value);
+  mainWindow.webContents.send('settings:get', store.get('settings'));
 });
 
-// for Mac
 app.on('window-all-closed', () => {
-  // quit when all windows are closed
   if (!isMac) {
     app.quit();
   }
 });
+
 app.on('activate', () => {
-  // create new window when dock icon is clicked and no other windows are open
   if (BrowserWindow.getAllWindows().length === 0) {
     createMainWindow();
   }
 });
+
+app.allowRendererProcessReuse = true;
